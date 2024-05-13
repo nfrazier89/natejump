@@ -1,0 +1,5 @@
+{
+  "executable": "C:\\cc65\\bin\\cl65",
+  "input": "natejump.asm",
+  "params": "--verbose --target nes -o natejump.nes"
+}
