@@ -8,11 +8,12 @@
 .segment "VECTORS"
   .addr nmi
   .addr reset
-  .addr 0                            ;i will learn about this for next project
+  .addr irq                        ;i will learn about this for next project
 
 ; time to define some constants
 .define spriteOAM $0200
 .define PPU_ADDR $2006
+.define player_y_velo $f0
 
 ; import the background and sprite data, just a few simple tiles for now
 .segment "CHARS"
@@ -22,9 +23,14 @@
 
 .segment "CODE"
 
+.proc irq
+  nop
+  rti
+.endproc
+
 ; params: $00 - direction (left or right) 0 is left 1 is right
 .proc moveLR
-ldx #3 ; byte 3 of object holds x pos
+  ldx #3 ; byte 3 of object holds x pos
 
 ; go through each of the 6 mini-sprites in the big sprite (me)
 nate_sprite_loop:
@@ -56,10 +62,10 @@ to_move_next_piece:
   ldx #0
   stx $00   ; reset parameter
   rts
-.endproc 
+.endproc
 
 .proc nmi
-  ; pushing accumulator onto stack ig?
+  ; we pushing accumulator onto stack ig?
   pha
   ; read controller input into accumulator
   jsr ReadController
@@ -79,27 +85,67 @@ left:
   ; now left
   lda $20
   and #%00000010
-  beq check_midair
+  beq handle_y
   
   ; store parameter for subroutine
   ldx #0
   stx $00
   jsr moveLR
 
-; trying some gravity shit here (move down automatically if you in air)
-; very simple for now, will have to change when introducing obstacles 
-check_midair:
+handle_y:
+ ; controller input here - is jump (A) being pressed
+  lda $20
+  and #%10000000
+  bne jump ; go up if jump pressed
   ; checks if bottom left part of sprite is touching bottom row
   ; if so, do not allow sprite to go down any farther
   ldx spriteOAM + 16
   cpx #215
   beq drawsprites
-
+  ; if not, go down
+  ldx spriteOAM
+  inx
+  stx spriteOAM
+  ldx spriteOAM + 4
+  inx
+  stx spriteOAM + 4
+  ldx spriteOAM + 8
+  inx
+  stx spriteOAM + 8
+  ldx spriteOAM + 12
+  inx
+  stx spriteOAM + 12
+  ldx spriteOAM + 16
+  inx
+  stx spriteOAM + 16
+  ldx spriteOAM + 20
+  inx
+  stx spriteOAM + 20
+  jmp drawsprites
+jump:
+  ldx spriteOAM
+  dex
+  stx spriteOAM
+  ldx spriteOAM + 4
+  dex
+  stx spriteOAM + 4
+  ldx spriteOAM + 8
+  dex
+  stx spriteOAM + 8
+  ldx spriteOAM + 12
+  dex
+  stx spriteOAM + 12
+  ldx spriteOAM + 16
+  dex
+  stx spriteOAM + 16
+  ldx spriteOAM + 20
+  dex
+  stx spriteOAM + 20
 drawsprites:
   ; sprite OAM range
   lda #$02
   sta $4014
-
+end:
   pla
   ; pull that shit back before we come bcak from the interrupt 
   rti
@@ -108,7 +154,7 @@ drawsprites:
 .proc reset
   sei                                ;disable interrupts on reset
   cld                                ;disable decimal mode, NES doesn't have it
-  ldx %01000000                      ;disable sound irq
+  ldx #%01000000                     ;disable sound irq (for now)
   stx $4017
   ldx #0
   stx $4010                          ;disable pcm channel
@@ -232,17 +278,17 @@ loadbackgroundpalettedata:
   cpx #$40
   bne loadbackgroundpalettedata
 
+  ; set player_y_velo to -1
+  lda #$ff
+  sta player_y_velo
+
   ; reset scroll (two writes, one for X scroll and then Y scroll)
   lda #$00
   sta $2005
   sta $2005
 
   ; ok now we can enable interrupts again
-  
-  ; wait for v blank
-  :
-  bit $2002
-  bpl :-
+  cli
 
   ; and now we tell the PPU to generate NMI when vblank occurs
   ; first 1 on this byte is NMI enable, and second 1 has to do
