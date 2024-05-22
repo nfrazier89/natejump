@@ -197,7 +197,7 @@ loadsprites:
   ; and now we tell the PPU to generate NMI when vblank occurs
   ; first 1 on this byte is NMI enable, and second 1 has to do
   ; with background tile select (it takes background tiles from
-  ; second section of chr rom?)
+  ; second section of chr rom i believe)
   lda #%10010000
   sta PPU_CTRL
 
@@ -207,18 +207,32 @@ loadsprites:
 
 gameloop:
   jsr MovementEngine
+  ; done - wait for vblank
 :
   bit PPU_STATUS
   bpl :-
   jmp gameloop
 .endproc
 
-; movement 1.0 - moves down if in midair
+; movement 1.1 - moves down if in midair, and left or right depending on
+;                controller input
 .proc MovementEngine
   lda spriteOAM + 16
   cmp #$D7
-  beq end
+  beq checkleft
   jsr movePlayerDown
+checkleft:
+  jsr ReadController
+  lda controller_inputs
+  and #%00000010
+  beq checkright
+  jsr movePlayerLeft
+checkright:
+  jsr ReadController
+  lda controller_inputs
+  and #%00000001
+  beq end
+  jsr movePlayerRight
 end:
   rts
 .endproc
@@ -237,8 +251,40 @@ nate_update_loop:
   tax
   dey
   bne nate_update_loop
+  rts
+.endproc
 
+.proc movePlayerLeft
+  ldy #6
+  ldx #3
+nate_update_loop:
+  lda spriteOAM, x
+  clc
+  adc #$ff
+  sta spriteOAM, x
+  txa
+  clc
+  adc #4
+  tax
+  dey
+  bne nate_update_loop
+  rts
+.endproc
 
+.proc movePlayerRight
+  ldy #6
+  ldx #3
+nate_update_loop:
+  lda spriteOAM, x
+  clc
+  adc #1
+  sta spriteOAM, x
+  txa
+  clc
+  adc #4
+  tax
+  dey
+  bne nate_update_loop
   rts
 .endproc
 
@@ -482,6 +528,7 @@ palette_loop:
   bcc palette_loop
 
   ; reset scroll back to where the player is
+  ; this will require a rework when the game gets more complex
   ; reset latch 
   ldx PPU_STATUS
   ldx #%10010100
