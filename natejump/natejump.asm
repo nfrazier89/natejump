@@ -14,6 +14,7 @@
 
 ; define macros
 .define tile_buffer                       $0100
+.define tile_buffer_palette_data          $0178
 .define spriteOAM                         $0200
 .define PPU_nametable_base_addr_hi        $20
 .define PPU_nametable_base_addr_lo        $00
@@ -27,6 +28,9 @@
 .define OAM_DMA                           $4014
 
 ; define zero-page variables
+
+; to determine whether we need to load more data in RAM
+.define draw                              $19
 
 ; where to take tiles from in the current level
 .define curr_level_addr_lo                $20
@@ -61,17 +65,24 @@ base_nametable_addr:
   rti
 .endproc
 
+; literally completes vblank with ~75 cycles to spare lol
+; inefficiency is my middle name
 .proc nmi
+  ldx draw
+  beq drawsprites
+  jsr draw_next_vertical_slice
+  dec draw
 drawsprites:
   ; sprite OAM range
   lda #$02
   sta OAM_DMA
+
   rti
 .endproc
 
 .proc reset
   sei                        ;disable interrupts for reset
-  cld                        ;NES does not have decimal mode, disable it
+  cld                        ;NES does not have decimal mode, disable it        
   ldx #%01000000
   stx $4017
   ldx #0
@@ -169,7 +180,10 @@ loadsprites:
 
   ; TODO: load and draw the next vertical slice 
   jsr load_next_vertical_slice
-  jsr draw_next_vertical_slice
+  ; raise flag to draw the slice in vblank
+  ldx #0
+  stx draw
+  inc draw
 
   ; reset PPU_SCROLL
   lda #$00
@@ -237,16 +251,16 @@ return:
   rts
 .endproc
 
-; TODO: load tiles needed when scrolling into tile_buffer at
-;       address $0100
-; using $02 for a loop counter (?)
+; Takes 4 columns' worth of level data and loads it into RAM for the PPU
+; to read during vblank
+; takes up ~15.5% of frame time. Combined with vblank, takes up ~23-24%
 .proc load_next_vertical_slice
   
   ; reset tile_buffer ptr
   ldx #$00
   stx tile_buffer_ptr_lo
 
-  ;thinking to use this as a counter to load 4 columns
+  ;counter in memory to check if loop has run 4 times
   ldx #4
   stx $02
 
@@ -257,7 +271,7 @@ vertical_slice:
   ldy curr_level_addr_lo
   sty $01
 ; alright we need to run this loop 30 times for each tile in a 
-; vertical slice
+; vertical column
   ldx #30
   ldy #0
 tile_loop:
@@ -318,7 +332,7 @@ check_palette_cond:
   dex
   bne load_palette_data
 
-  ; reset palette ptr to original #1
+  ; reset palette ptr to original + 1
   ldx $00
   ldy $01
   iny
@@ -334,8 +348,92 @@ store_new_palette_addr:
 ; TODO: take the tiles loaded into tile_buffer and draw them
 ;       in the nametables accordingly
 .proc draw_next_vertical_slice
-  ldx curr_ppu_nametable_ptr_hi
+
+  ; reset latch 
+  ldx PPU_STATUS
+  ; vertical increment mode on the PPU
+  ldx #%10010101
+  stx PPU_CTRL
+
+  ; loop counter for columns 
+  ldx #4
+  stx $00
+  ldx #0
+load_next_column:
+  ldy curr_ppu_nametable_ptr_hi
+  sty PPU_ADDR
   ldy curr_ppu_nametable_ptr_lo
+  sty PPU_ADDR
+  ; x here is used as offset for tile_buffer, y is used as loop counter
+  ldy #3
+column_loop:
+  ; this may look like shit but unrolled loop may be the move here to save time
+  ; each iteration loads 10 tiles into VRAM (can play around with this number 
+  ; potentially)
+  lda tile_buffer, x
+  sta PPU_DATA
+  inx
+  lda tile_buffer, x
+  sta PPU_DATA
+  inx
+  lda tile_buffer, x
+  sta PPU_DATA
+  inx
+  lda tile_buffer, x
+  sta PPU_DATA
+  inx
+  lda tile_buffer, x
+  sta PPU_DATA
+  inx
+  lda tile_buffer, x
+  sta PPU_DATA
+  inx
+  lda tile_buffer, x
+  sta PPU_DATA
+  inx
+  lda tile_buffer, x
+  sta PPU_DATA
+  inx
+  lda tile_buffer, x
+  sta PPU_DATA
+  inx
+  lda tile_buffer, x
+  sta PPU_DATA
+  inx
+  
+  dey
+  bne column_loop
+
+  ; get PPU ready for next column
+  inc curr_ppu_nametable_ptr_lo
+
+  dec $00
+  bne load_next_column
+
+  ; palette time (hardcoded for now)
+  lda #$C0
+  ldy #0
+palette_loop:
+  ldx PPU_STATUS
+  ldx #$27
+  stx PPU_ADDR
+  sta PPU_ADDR
+  ldx tile_buffer_palette_data, y
+  stx PPU_DATA
+  iny
+  clc 
+  adc #$08
+  bcc palette_loop
+
+  ; reset scroll back to where the player is
+  ; reset latch 
+  ldx PPU_STATUS
+  ldx #%10010100
+  stx PPU_CTRL
+  lda #0
+  sta PPU_SCROLL
+  sta PPU_SCROLL
+
   rts
 .endproc
 
