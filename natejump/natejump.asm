@@ -19,6 +19,8 @@
 .define PPU_nametable_base_addr_hi        $20
 .define PPU_nametable_base_addr_lo        $00
 
+.define bottom_row                        $D7
+
 .define PPU_CTRL                          $2000
 .define PPU_MASK                          $2001
 .define PPU_STATUS                        $2002
@@ -28,6 +30,9 @@
 .define OAM_DMA                           $4014
 
 ; define zero-page variables
+
+; controller inputs
+.define controller_inputs                 $18
 
 ; to determine whether we need to load more data in RAM
 .define draw                              $19
@@ -178,12 +183,9 @@ loadsprites:
   ; draw the starting nametable to the screen
   jsr draw_starting_screen
 
-  ; TODO: load and draw the next vertical slice 
-  jsr load_next_vertical_slice
-  ; raise flag to draw the slice in vblank
+  ; jsr load_next_vertical_slice
   ldx #0
   stx draw
-  inc draw
 
   ; reset PPU_SCROLL
   lda #$00
@@ -203,8 +205,62 @@ loadsprites:
   lda #%00011110
   sta PPU_MASK
 
-label:
-  jmp label
+gameloop:
+  jsr MovementEngine
+:
+  bit PPU_STATUS
+  bpl :-
+  jmp gameloop
+.endproc
+
+; movement 1.0 - moves down if in midair
+.proc MovementEngine
+  lda spriteOAM + 16
+  cmp #$D7
+  beq end
+  jsr movePlayerDown
+end:
+  rts
+.endproc
+
+.proc movePlayerDown
+  ldy #6
+  ldx #0
+nate_update_loop:
+  lda spriteOAM, x
+  clc
+  adc #1
+  sta spriteOAM, x
+  txa
+  clc
+  adc #4
+  tax
+  dey
+  bne nate_update_loop
+
+
+  rts
+.endproc
+
+; takes in controller input
+.proc ReadController
+  ; init output memory
+  lda #1
+  sta controller_inputs
+
+  ; send the latch pulse down to the shift register on the controller
+  sta $4016
+  lda #0
+  sta $4016
+
+  ; read buttons from controller
+read_loop:
+  lda $4016
+  lsr a
+  rol controller_inputs
+  bcc read_loop
+
+  rts
 .endproc
 
 .proc draw_starting_screen
