@@ -31,6 +31,12 @@
 
 ; define zero-page variables
 
+; current index in jump_list (used when player
+; is in the process of jumping) and a boolean
+; denoting whether player is currently jumping
+.define jump                              $16
+.define jump_index                        $17
+
 ; controller inputs
 .define controller_inputs                 $18
 
@@ -180,6 +186,11 @@ loadsprites:
   lda base_nametable_addr + 1
   sta curr_ppu_nametable_ptr_hi
 
+  ; reset jump boolean, jump index
+  ldx #0
+  stx jump
+  stx jump_index
+
   ; draw the starting nametable to the screen
   jsr draw_starting_screen
 
@@ -216,24 +227,71 @@ gameloop:
 
 ; movement 1.1 - moves down if in midair, and left or right depending on
 ;                controller input
+; 1.2          - adds rudimentary jump
 .proc MovementEngine
+  jsr ReadController                ; read controller inputs for this frame
+  lda jump
+  bne handle_jump
+  lda controller_inputs
+  and #%10000000
+  beq checkgravity
+handle_jump:
+  ; set jump to true when jumping (no harm done if its already 1)
+  lda #1
+  sta jump
+  jsr HandleJump                    ; gravity is not checked since the
+  jmp checkleft                     ; player is currently defying it   
+checkgravity:                       
   lda spriteOAM + 16
   cmp #$D7
   beq checkleft
   jsr movePlayerDown
 checkleft:
-  jsr ReadController
   lda controller_inputs
   and #%00000010
   beq checkright
   jsr movePlayerLeft
 checkright:
-  jsr ReadController
   lda controller_inputs
   and #%00000001
   beq end
   jsr movePlayerRight
 end:
+  rts
+.endproc
+
+.proc HandleJump
+  ldx jump_index
+  ldy jump_values, x
+  sty $00
+  stx $01
+  jsr movePlayerUp
+  ldx $01
+  inx
+  cpx #54 ; index 18 denotes the end of the list
+  bne end
+  ldx #0  ; reset jump index and jump boolean since the jump is done
+  stx jump
+end:
+  stx jump_index
+  rts
+.endproc
+
+; $00 contains the value to change player y-pos 
+.proc movePlayerUp
+  ldy #6
+  ldx #0
+nate_update_loop:
+  lda spriteOAM, x
+  clc
+  adc $00
+  sta spriteOAM, x
+  txa 
+  clc
+  adc #4
+  tax
+  dey
+  bne nate_update_loop
   rts
 .endproc
 
@@ -372,8 +430,8 @@ vertical_slice:
   stx $00
   ldy curr_level_addr_lo
   sty $01
-; alright we need to run this loop 30 times for each tile in a 
-; vertical column
+ ; alright we need to run this loop 30 times for each tile in a 
+ ; vertical column
   ldx #30
   ldy #0
 tile_loop:
@@ -539,6 +597,10 @@ palette_loop:
 
   rts
 .endproc
+
+; values to pull when jumping
+jump_values:
+  .byte $FD, $FD, $FD, $FD, $FD, $FD, $FD, $FD, $FD, $FE, $FE, $FE, $FE, $FE, $FE, $FE, $FE, $FE, $FF, $FF, $FF, $FF, $FF, $FF, $00, $00, $00, $00, $00, $00, $01, $01, $01, $01, $01, $01, $02, $02, $02, $02, $02, $02, $02, $02, $02, $03, $03, $03, $03, $03, $03, $03, $03, $03, $00 
 
 palettedata:
   .incbin "data\\palettedata.dat"
