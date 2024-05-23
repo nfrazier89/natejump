@@ -77,7 +77,8 @@ base_nametable_addr:
 .endproc
 
 ; literally completes vblank with ~75 cycles to spare lol
-; inefficiency is my middle name
+; not sure if I am ineffecient or if I should just load less tiles into 
+; the tile_buffer per frame if we need to scroll. smtg to think about
 .proc nmi
   ldx draw
   beq drawsprites
@@ -228,6 +229,7 @@ gameloop:
 ; movement 1.1 - moves down if in midair, and left or right depending on
 ;                controller input
 ; 1.2          - adds rudimentary jump
+; 1.3          - more space efficient movement subroutine
 .proc MovementEngine
   jsr ReadController                ; read controller inputs for this frame
   lda jump
@@ -242,20 +244,32 @@ handle_jump:
   jsr HandleJump                    ; gravity is not checked since the
   jmp checkleft                     ; player is currently defying it   
 checkgravity:                       
-  lda spriteOAM + 16
-  cmp #$D7
-  beq checkleft
-  jsr movePlayerDown
+  lda spriteOAM + 16                ; bottom left of sprite x-pos
+  cmp #$D7                          ; tentatively bottom row of level
+  bcs checkleft
+  ldx #$00
+  ldy #$02
+  stx $00
+  sty $01
+  jsr movePlayer
 checkleft:
   lda controller_inputs
   and #%00000010
   beq checkright
-  jsr movePlayerLeft
+  ldx #$03
+  ldy #$ff
+  stx $00
+  sty $01
+  jsr movePlayer
 checkright:
   lda controller_inputs
   and #%00000001
   beq end
-  jsr movePlayerRight
+  ldx #$03
+  ldy #$01
+  stx $00
+  sty $01
+  jsr movePlayer
 end:
   rts
 .endproc
@@ -263,10 +277,12 @@ end:
 .proc HandleJump
   ldx jump_index
   ldy jump_values, x
-  sty $00
-  stx $01
-  jsr movePlayerUp
-  ldx $01
+  stx $02
+  ldx #$00
+  stx $00
+  sty $01
+  jsr movePlayer
+  ldx $02
   inx
   cpx #54 ; index 18 denotes the end of the list
   bne end
@@ -277,65 +293,15 @@ end:
   rts
 .endproc
 
-; $00 contains the value to change player y-pos 
-.proc movePlayerUp
+; $00 is value that determines x or y pos of sprite to be changed
+; $01 is value to increase/decrease the x/y pos by
+.proc movePlayer
   ldy #6
-  ldx #0
+  ldx $00
 nate_update_loop:
   lda spriteOAM, x
   clc
-  adc $00
-  sta spriteOAM, x
-  txa 
-  clc
-  adc #4
-  tax
-  dey
-  bne nate_update_loop
-  rts
-.endproc
-
-.proc movePlayerDown
-  ldy #6
-  ldx #0
-nate_update_loop:
-  lda spriteOAM, x
-  clc
-  adc #1
-  sta spriteOAM, x
-  txa
-  clc
-  adc #4
-  tax
-  dey
-  bne nate_update_loop
-  rts
-.endproc
-
-.proc movePlayerLeft
-  ldy #6
-  ldx #3
-nate_update_loop:
-  lda spriteOAM, x
-  clc
-  adc #$ff
-  sta spriteOAM, x
-  txa
-  clc
-  adc #4
-  tax
-  dey
-  bne nate_update_loop
-  rts
-.endproc
-
-.proc movePlayerRight
-  ldy #6
-  ldx #3
-nate_update_loop:
-  lda spriteOAM, x
-  clc
-  adc #1
+  adc $01
   sta spriteOAM, x
   txa
   clc
