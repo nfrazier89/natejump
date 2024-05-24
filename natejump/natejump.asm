@@ -21,6 +21,9 @@
 
 .define bottom_row                        $D7
 
+.define and_imm_opcode                    $29
+.define ora_imm_opcode                    $09
+
 .define PPU_CTRL                          $2000
 .define PPU_MASK                          $2001
 .define PPU_STATUS                        $2002
@@ -30,6 +33,15 @@
 .define OAM_DMA                           $4014
 
 ; define zero-page variables
+
+; frame counter for when to update player sprite animation
+.define animation_frame_ct                $14
+
+; determines animation state:
+;     - bit 0 determines sprite direction (set: left, cleared: right)
+;     - bit 1 determines jumping state (set: jumping, cleared: not jumping)
+;     - bit 2 determines moving state (set: moving, cleared: not moving) 
+.define player_animation_state            $15
 
 ; current index in jump_list (used when player
 ; is in the process of jumping) and a boolean
@@ -59,9 +71,21 @@
 .define curr_level_palette_ptr_lo         $26
 .define curr_level_palette_ptr_hi         $27
 
+; current pointer to pull animation data from
+.define animation_ptr_lo                  $28
+.define animation_ptr_hi                  $29
+
 .segment "STARTUP"
 
 .CODE
+
+; constants for checking animation state
+check_direction_bit:
+  .byte %00000001
+check_jumping_bit:
+  .byte %00000010
+check_moving_bit:
+  .byte %00000100
 
 ; useful pointers needed for loading them into memory
 tile_buffer_base_addr:
@@ -70,6 +94,20 @@ level_one_base_addr:
   .addr levelone
 base_nametable_addr:
   .addr $2000
+
+; animation pointers
+nate_idle_left_ptr:
+  .addr nate_idle_left
+nate_idle_right_ptr:
+  .addr nate_idle_right
+nate_moving_left_ptr:
+  .addr nate_moving_left
+nate_moving_right_ptr:
+  .addr nate_moving_right
+nate_jumping_left_ptr:
+  .addr nate_jumping_left
+nate_jumping_right_ptr:
+  .addr nate_jumping_right 
 
 
 .proc irq
@@ -233,6 +271,8 @@ gameloop:
 ; 1.2          - adds rudimentary jump
 ; 1.3          - more space efficient movement subroutine
 ; 1.4          - flips player sprite left/right with direction of movement
+; 1.5          - animates player with simple 2-frame animation and a jumping
+;              - animation state
 .proc MovementEngine
   lda jump
   bne handle_jump
@@ -263,22 +303,36 @@ checkleft:
   stx $00
   sty $01
   jsr movePlayer
-  jsr flipPlayerLeft
+  lda #%00000101 ; set direction, moving bits
+  ora player_animation_state
+  sta player_animation_state
 checkright:
   lda controller_inputs
   and #%00000001
-  beq end
+  beq animate_player
   ldx #$03
   ldy #$01
   stx $00
   sty $01
   jsr movePlayer
-  jsr flipPlayerRight
+  lda #%11111110 ; clear direction bit
+  and player_animation_state
+  ora #%00000100 ; set moving bit
+  sta player_animation_state
+  ; animate player based on updated animation state data
+animate_player:
+  jsr animatePlayer
 end:
+  lda #%00000001
+  and player_animation_state
+  sta player_animation_state   ; reset animation state for next frame
   rts
 .endproc
 
 .proc HandleJump
+  lda #%00000010 ; set jump bit in player animation state
+  ora player_animation_state
+  sta player_animation_state
   ldx jump_index
   ldy jump_values, x
   stx $02
@@ -288,10 +342,13 @@ end:
   jsr movePlayer
   ldx $02
   inx
-  cpx #54 ; index 18 denotes the end of the list
+  cpx #54 ; index 54 denotes the end of the list (jump lasts 54 frames)
   bne end
   ldx #0  ; reset jump index and jump boolean since the jump is done
   stx jump
+  lda #%11111101 ; clear jump bit in animation state
+  and player_animation_state
+  sta player_animation_state
 end:
   stx jump_index
   rts
@@ -316,36 +373,134 @@ nate_update_loop:
   rts
 .endproc
 
-; takes values pre-defined in data below 
-.proc flipPlayerRight
+; animates player based on animation state
+; pseudocode:
+; if (jumping)
+;   animate jump 
+; else if (moving)
+;   inc frame ct
+;   load sprite data for current left or right animation state
+;   for 0 < frame_ct < 15 play idle animation, for 15 < frame_ct < 30 play 
+;           moving animation
+;   reset frame ct to 0 when it gets to 30
+; else if (idle)
+;   load sprite data for left or right animation state
+.proc animatePlayer
+  ldx #0
   ldy #0
-  ldx #1
-nate_update_loop:
-  lda nate_facing_right, y
-  sta spriteOAM, x
-  inx
-  lda spriteOAM, x
-  and #%10111111                 ; clears flip bit in byte 2 of attributes
-  sta spriteOAM, x
-  txa
-  clc
-  adc #3
-  tax
-  iny
-  cpy #6
-  bne nate_update_loop
-  rts
-.endproc
+  lda player_animation_state
+  bit check_jumping_bit
+  beq check_moving
+  jmp jumping
+check_moving:
+  bit check_moving_bit
+  bne moving_animation
+idle:
+  and check_direction_bit
+  beq load_idle_right
+load_idle_left:
+  lda nate_idle_left_ptr + 1
+  sta animation_ptr_hi
 
-.proc flipPlayerLeft
+  lda nate_idle_left_ptr
+  sta animation_ptr_lo
+
+  jmp animate
+load_idle_right:
+
+  lda nate_idle_right_ptr + 1
+  sta animation_ptr_hi
+
+  lda nate_idle_right_ptr
+  sta animation_ptr_lo
+
+  jmp animate
+moving_animation:
+  and check_direction_bit
+  beq moving_right
+moving_left:
+  ldx animation_frame_ct
+  inx
+  stx animation_frame_ct
+  cpx #15
+  bpl load_moving_left
+  
+  lda nate_idle_left_ptr + 1
+  sta animation_ptr_hi
+
+  lda nate_idle_left_ptr
+  sta animation_ptr_lo
+
+  jmp update_frame_ct
+load_moving_left:
+  lda nate_moving_left_ptr + 1
+  sta animation_ptr_hi
+
+  lda nate_moving_left_ptr
+  sta animation_ptr_lo
+  jmp update_frame_ct
+moving_right:
+  ldx animation_frame_ct
+  inx
+  stx animation_frame_ct
+  cpx #15
+  bpl load_moving_right
+  
+  lda nate_idle_right_ptr + 1
+  sta animation_ptr_hi
+
+  lda nate_idle_right_ptr
+  sta animation_ptr_lo
+  jmp update_frame_ct
+load_moving_right:
+  lda nate_moving_right_ptr + 1
+  sta animation_ptr_hi
+
+  lda nate_moving_right_ptr
+  sta animation_ptr_lo
+update_frame_ct:
+  cpx #30
+  bne animate
+  ldx #0
+  stx animation_frame_ct ; reset animation frame counter
+  jmp animate
+jumping:
+  and check_direction_bit
+  beq load_jumping_right
+  
+  lda nate_jumping_left_ptr + 1
+  sta animation_ptr_hi
+
+  lda nate_jumping_left_ptr
+  sta animation_ptr_lo
+
+  jmp animate
+load_jumping_right:
+
+  lda nate_jumping_right_ptr + 1
+  sta animation_ptr_hi
+
+  lda nate_jumping_right_ptr
+  sta animation_ptr_lo 
+animate:
   ldy #0
   ldx #1
 nate_update_loop:
-  lda nate_facing_left, y
+  lda (animation_ptr_lo), y
   sta spriteOAM, x
   inx
+  ; check player facing direction once more to see if we flip 
+  ; attribute bit or not
+  lda player_animation_state
+  and check_direction_bit
+  bne flip_horizontally
   lda spriteOAM, x
-  ora #%01000000                 ; sets flip bit in byte 2 of attributes
+  and #%10111111
+  jmp store_dir_attr
+flip_horizontally:
+  lda spriteOAM, x
+  ora #%01000000
+store_dir_attr:
   sta spriteOAM, x
   txa
   clc
@@ -354,8 +509,15 @@ nate_update_loop:
   iny
   cpy #6
   bne nate_update_loop
+  ; check if player is moving, set/clear moving bit accordingly
+  lda controller_inputs
+  and #%00000011
+  bne end
+  lda player_animation_state
+  and #%11111011
+end:
   rts
-.endproc
+.endproc 
 
 ; takes in controller input
 .proc ReadController
@@ -610,12 +772,19 @@ palette_loop:
   rts
 .endproc
 
-; sprite values from chr file for nate when facing left or right
-nate_facing_left:
+; sprite tile index for each sprite in each animation state
+nate_idle_left:
   .byte $01, $00, $11, $10, $21, $20
-
-nate_facing_right:
+nate_moving_left:
+  .byte $01, $00, $13, $12, $23, $22
+nate_jumping_left:
+  .byte $01, $00, $31, $30, $41, $40
+nate_idle_right:
   .byte $00, $01, $10, $11, $20, $21
+nate_moving_right:
+  .byte $00, $01, $12, $13, $22, $23
+nate_jumping_right:
+  .byte $00, $01, $30, $31, $40, $41
 
 ; values to pull when jumping
 jump_values:
