@@ -218,6 +218,7 @@ loadsprites:
   sta PPU_MASK
 
 gameloop:
+  jsr ReadController                ; read controller inputs for this frame
   jsr MovementEngine
   ; done - wait for vblank
 :
@@ -226,12 +227,13 @@ gameloop:
   jmp gameloop
 .endproc
 
-; movement 1.1 - moves down if in midair, and left or right depending on
+; handles player movement each frame
+; 1.1          - moves down if in midair, and left or right depending on
 ;                controller input
 ; 1.2          - adds rudimentary jump
 ; 1.3          - more space efficient movement subroutine
+; 1.4          - flips player sprite left/right with direction of movement
 .proc MovementEngine
-  jsr ReadController                ; read controller inputs for this frame
   lda jump
   bne handle_jump
   lda controller_inputs
@@ -244,8 +246,8 @@ handle_jump:
   jsr HandleJump                    ; gravity is not checked since the
   jmp checkleft                     ; player is currently defying it   
 checkgravity:                       
-  lda spriteOAM + 16                ; bottom left of sprite x-pos
-  cmp #$D7                          ; tentatively bottom row of level
+  lda spriteOAM + 16                ; bottom left of player x-pos
+  cmp #bottom_row                   ; tentatively bottom row of level
   bcs checkleft
   ldx #$00
   ldy #$02
@@ -261,6 +263,7 @@ checkleft:
   stx $00
   sty $01
   jsr movePlayer
+  jsr flipPlayerLeft
 checkright:
   lda controller_inputs
   and #%00000001
@@ -270,6 +273,7 @@ checkright:
   stx $00
   sty $01
   jsr movePlayer
+  jsr flipPlayerRight
 end:
   rts
 .endproc
@@ -308,6 +312,47 @@ nate_update_loop:
   adc #4
   tax
   dey
+  bne nate_update_loop
+  rts
+.endproc
+
+; takes values pre-defined in data below 
+.proc flipPlayerRight
+  ldy #0
+  ldx #1
+nate_update_loop:
+  lda nate_facing_right, y
+  sta spriteOAM, x
+  inx
+  lda spriteOAM, x
+  and #%10111111                 ; clears flip bit in byte 2 of attributes
+  sta spriteOAM, x
+  txa
+  clc
+  adc #3
+  tax
+  iny
+  cpy #6
+  bne nate_update_loop
+  rts
+.endproc
+
+.proc flipPlayerLeft
+  ldy #0
+  ldx #1
+nate_update_loop:
+  lda nate_facing_left, y
+  sta spriteOAM, x
+  inx
+  lda spriteOAM, x
+  ora #%01000000                 ; sets flip bit in byte 2 of attributes
+  sta spriteOAM, x
+  txa
+  clc
+  adc #3
+  tax
+  iny
+  cpy #6
   bne nate_update_loop
   rts
 .endproc
@@ -471,8 +516,9 @@ store_new_palette_addr:
   rts
 .endproc
 
-; TODO: take the tiles loaded into tile_buffer and draw them
-;       in the nametables accordingly
+; takes the tiles loaded into tile_buffer and draw them
+; in the nametables accordingly
+; *** needs to be more general, still some hardcoding in there right now ***
 .proc draw_next_vertical_slice
 
   ; reset latch 
@@ -563,6 +609,13 @@ palette_loop:
 
   rts
 .endproc
+
+; sprite values from chr file for nate when facing left or right
+nate_facing_left:
+  .byte $01, $00, $11, $10, $21, $20
+
+nate_facing_right:
+  .byte $00, $01, $10, $11, $20, $21
 
 ; values to pull when jumping
 jump_values:
