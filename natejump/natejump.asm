@@ -374,7 +374,7 @@ nate_update_loop:
 .endproc
 
 ; animates player based on animation state
-; pseudocode:
+; pseudocode representation:
 ; if (jumping)
 ;   animate jump 
 ; else if (moving)
@@ -388,14 +388,18 @@ nate_update_loop:
 .proc animatePlayer
   ldx #0
   ldy #0
+  ; checks each bit in animation state and jumps accordingly
   lda player_animation_state
   bit check_jumping_bit
   beq check_moving
   jmp jumping
+  ; since we ain't jumping, we check if we're moving on the ground
 check_moving:
   bit check_moving_bit
   bne moving_animation
+  ; if player is neither jumping nor moving, we just load idle animation
 idle:
+  ; has to load differently depending on direction faced
   and check_direction_bit
   beq load_idle_right
 load_idle_left:
@@ -415,6 +419,9 @@ load_idle_right:
   sta animation_ptr_lo
 
   jmp animate
+  ; handles the moving animations:
+  ;   - uses a frame counter to count
+  ;     frames so sprite can switch animations
 moving_animation:
   and check_direction_bit
   beq moving_right
@@ -424,7 +431,7 @@ moving_left:
   stx animation_frame_ct
   cpx #15
   bpl load_moving_left
-  
+  ; still in idle phase of moving animation when frame_ct < 15
   lda nate_idle_left_ptr + 1
   sta animation_ptr_hi
 
@@ -433,6 +440,7 @@ moving_left:
 
   jmp update_frame_ct
 load_moving_left:
+  ; since 15 < x < 30, we are in moving phase of animation
   lda nate_moving_left_ptr + 1
   sta animation_ptr_hi
 
@@ -459,6 +467,7 @@ load_moving_right:
   lda nate_moving_right_ptr
   sta animation_ptr_lo
 update_frame_ct:
+  ; reset counter when it hits 30
   cpx #30
   bne animate
   ldx #0
