@@ -16,13 +16,11 @@
 .define tile_buffer                       $0100
 .define tile_buffer_palette_data          $0178
 .define spriteOAM                         $0200
+
 .define PPU_nametable_base_addr_hi        $20
 .define PPU_nametable_base_addr_lo        $00
 
 .define bottom_row                        $D7
-
-.define and_imm_opcode                    $29
-.define ora_imm_opcode                    $09
 
 .define PPU_CTRL                          $2000
 .define PPU_MASK                          $2001
@@ -34,14 +32,22 @@
 
 ; define zero-page variables
 
+; maybe reserve $00 - $10 for function parameters / extra registers
+
+
+; player x pos and y pos to check level collision
+.define player_x_pos                      $12
+.define player_y_pos                      $13
+
 ; frame counter for when to update player sprite animation
 .define animation_frame_ct                $14
 
-; determines animation state:
-;     - bit 0 determines sprite direction (set: left, cleared: right)
+; determines the current player state:
+;     - bit 0 determines player direction (set: left, cleared: right)
 ;     - bit 1 determines jumping state (set: jumping, cleared: not jumping)
 ;     - bit 2 determines moving state (set: moving, cleared: not moving) 
-.define player_animation_state            $15
+;     - bit 3 determines falling state (set: falling, cleared: not falling)
+.define current_player_state            $15
 
 ; current index in jump_list (used when player
 ; is in the process of jumping) and a boolean
@@ -79,13 +85,15 @@
 
 .CODE
 
-; constants for checking animation state
+; constants for checking player state
 check_direction_bit:
   .byte %00000001
 check_jumping_bit:
   .byte %00000010
 check_moving_bit:
   .byte %00000100
+check_falling_bit:
+  .byte %00001000
 
 ; useful pointers needed for loading them into memory
 tile_buffer_base_addr:
@@ -265,6 +273,20 @@ gameloop:
   jmp gameloop
 .endproc
 
+; sample code cuz we renovating the movement engine
+; checkleft:
+;   lda controller_inputs
+;   and #%00000010
+;   beq checkright
+;   ldx #$03
+;   ldy #$ff
+;   stx $00
+;   sty $01
+;   jsr movePlayer
+;   lda #%00000101 ; set direction, moving bits
+;   ora current_player_state
+;   sta current_player_state
+
 ; handles player movement each frame
 ; 1.1          - moves down if in midair, and left or right depending on
 ;                controller input
@@ -273,82 +295,68 @@ gameloop:
 ; 1.4          - flips player sprite left/right with direction of movement
 ; 1.5          - animates player with simple 2-frame animation and a jumping
 ;              - animation state
+;
+; 2.0          - revamped to hopefully be cleaner, fixes bugs from original
 .proc MovementEngine
-  lda jump
-  bne handle_jump
-  lda controller_inputs
-  and #%10000000
-  beq checkgravity
-handle_jump:
-  ; set jump to true when jumping (no harm done if its already 1)
-  lda #1
-  sta jump
-  jsr HandleJump                    ; gravity is not checked since the
-  jmp checkleft                     ; player is currently defying it   
-checkgravity:                       
-  lda spriteOAM + 16                ; bottom left of player x-pos
-  cmp #bottom_row                   ; tentatively bottom row of level
-  bcs checkleft
-  ldx #$00
-  ldy #$02
-  stx $00
-  sty $01
-  jsr movePlayer
-checkleft:
-  lda controller_inputs
+  lda controller_inputs                    ; check left/right movement first
   and #%00000010
   beq checkright
+  lda #%00000101                           ; set direction, moving bits
+  ora current_player_state
+  sta current_player_state
   ldx #$03
   ldy #$ff
   stx $00
   sty $01
   jsr movePlayer
-  lda #%00000101 ; set direction, moving bits
-  ora player_animation_state
-  sta player_animation_state
 checkright:
   lda controller_inputs
   and #%00000001
-  beq animate_player
+  beq check_jump
+  lda #%11111110                           ; clear direction bit
+  and current_player_state
+  ora #%00000100                           ; set moving bit
+  sta current_player_state
   ldx #$03
   ldy #$01
   stx $00
   sty $01
   jsr movePlayer
-  lda #%11111110 ; clear direction bit
-  and player_animation_state
-  ora #%00000100 ; set moving bit
-  sta player_animation_state
-  ; animate player based on updated animation state data
+check_jump:
+  lda controller_inputs
+  and #%10000000
+  beq check_falling
+  ; here if the button is pressed we need to check if the player is falling
+  ; if player is falling, do not allow jump
+  lda current_player_state
+  and check_falling_bit
+  bne check_falling
+  ; we jumping
+  lda #%00000010
+  ora current_player_state
+  sta current_player_state
+  jsr HandleJump
+check_falling:
+  ; here we update falling bit by checking collision (maybe)
 animate_player:
+  ; animate player based on updated animation state data
   jsr animatePlayer
 end:
-  lda #%00000001
-  and player_animation_state
-  sta player_animation_state   ; reset animation state for next frame
+  lda #%00001001
+  and current_player_state                 ; reset animation state bits (except for 
+  sta current_player_state                 ; direction bit and falling bit)
   rts
 .endproc
 
 .proc HandleJump
-  lda #%00000010 ; set jump bit in player animation state
-  ora player_animation_state
-  sta player_animation_state
   ldx jump_index
   ldy jump_values, x
-  stx $02
-  ldx #$00
-  stx $00
-  sty $01
-  jsr movePlayer
-  ldx $02
-  inx
-  cpx #54 ; index 54 denotes the end of the list (jump lasts 54 frames)
-  bne end
-  ldx #0  ; reset jump index and jump boolean since the jump is done
-  stx jump
-  lda #%11111101 ; clear jump bit in animation state
-  and player_animation_state
-  sta player_animation_state
+  ; new functionality:
+  ;   - when jump starts, set jump bit
+  ;   - has jump bit set until middle of jump_list reached, at which point it gets
+  ;     cleared
+  ;   - also at this point set falling bit
+  ;   
 end:
   stx jump_index
   rts
@@ -389,7 +397,7 @@ nate_update_loop:
   ldx #0
   ldy #0
   ; checks each bit in animation state and jumps accordingly
-  lda player_animation_state
+  lda current_player_state
   bit check_jumping_bit
   beq check_moving
   jmp jumping
@@ -500,7 +508,7 @@ nate_update_loop:
   inx
   ; check player facing direction once more to see if we flip 
   ; attribute bit or not
-  lda player_animation_state
+  lda current_player_state
   and check_direction_bit
   bne flip_horizontally
   lda spriteOAM, x
@@ -522,7 +530,7 @@ store_dir_attr:
   lda controller_inputs
   and #%00000011
   bne end
-  lda player_animation_state
+  lda current_player_state
   and #%11111011
 end:
   rts
@@ -797,7 +805,7 @@ nate_jumping_right:
 
 ; values to pull when jumping
 jump_values:
-  .byte $FD, $FD, $FD, $FD, $FD, $FD, $FD, $FD, $FD, $FE, $FE, $FE, $FE, $FE, $FE, $FE, $FE, $FE, $FF, $FF, $FF, $FF, $FF, $FF, $00, $00, $00, $00, $00, $00, $01, $01, $01, $01, $01, $01, $02, $02, $02, $02, $02, $02, $02, $02, $02, $03, $03, $03, $03, $03, $03, $03, $03, $03, $00 
+  .byte $FD, $FD, $FD, $FD, $FD, $FD, $FD, $FD, $FD, $FE, $FE, $FE, $FE, $FE, $FE, $FE, $FE, $FE, $FF, $FF, $FF, $FF, $FF, $FF, $00, $00, $00, $00, $00, $00, $01, $01, $01, $01, $01, $01, $02, $02, $02, $02, $02, $02, $02, $02, $02, $03, $03, $03, $03, $03, $03, $03, $03, $03
 
 palettedata:
   .incbin "data\\palettedata.dat"
