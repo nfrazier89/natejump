@@ -47,13 +47,13 @@
 ;     - bit 1 determines jumping state (set: jumping, cleared: not jumping)
 ;     - bit 2 determines moving state (set: moving, cleared: not moving) 
 ;     - bit 3 determines falling state (set: falling, cleared: not falling)
-.define current_player_state            $15
+.define current_player_state              $15
 
 ; current index in jump_list (used when player
 ; is in the process of jumping) and a boolean
 ; denoting whether player is currently jumping
-.define jump                              $16
-.define jump_index                        $17
+.define jump_index                        $16
+.define fall_index                        $17
 
 ; controller inputs
 .define controller_inputs                 $18
@@ -235,7 +235,6 @@ loadsprites:
 
   ; reset jump boolean, jump index
   ldx #0
-  stx jump
   stx jump_index
 
   ; draw the starting nametable to the screen
@@ -296,7 +295,10 @@ gameloop:
 ; 1.5          - animates player with simple 2-frame animation and a jumping
 ;              - animation state
 ;
-; 2.0          - revamped to hopefully be cleaner, fixes bugs from original
+; 2.0          - revamped to hopefully be cleaner, fixes problems from v1 
+;              - differentiates between jumping and falling so that player
+;                can fall off of platforms and also not be able to jump while
+;                falling
 .proc MovementEngine
   lda controller_inputs                    ; check left/right movement first
   and #%00000010
@@ -323,42 +325,122 @@ checkright:
   sty $01
   jsr movePlayer
 check_jump:
+  lda current_player_state
+  and #%00000010
+  bne handle_jump
   lda controller_inputs
   and #%10000000
-  beq check_falling
-  ; here if the button is pressed we need to check if the player is falling
-  ; if player is falling, do not allow jump
+  ; if neither jumping nor pressing A, check gravity to see if player is in midair
+  beq update_falling
+handle_jump:
+  ; before we jump we need to make sure we are not falling
+  ; this check is made because of the case where the player walks off of a
+  ; platform (meaning the player is in midair, but neither jumping nor pressing
+  ; A to jump)
   lda current_player_state
-  and check_falling_bit
-  bne check_falling
-  ; we jumping
+  and #%00001000
+  bne update_falling
+  ; we jumping now so set the jump bit and then handle that business 
   lda #%00000010
   ora current_player_state
   sta current_player_state
-  jsr HandleJump
-check_falling:
-  ; here we update falling bit by checking collision (maybe)
+  jsr handleJump
+  jmp animate_player
+update_falling:
+  ; check collision - if player is on the ground, falling bit is cleared and 
+  ; player does not fall
+  jsr checkLowerCollision
+
+  lda current_player_state
+  and #%00001000
+  beq animate_player
+
+  ; if falling bit is still set, handle fall
+  jsr handleFall
+  
 animate_player:
-  ; animate player based on updated animation state data
+  ; animate player based on updated player state data
   jsr animatePlayer
 end:
-  lda #%00001001
-  and current_player_state                 ; reset animation state bits (except for 
-  sta current_player_state                 ; direction bit and falling bit)
+  lda #%11111011
+  and current_player_state                 ; clear moving bit for next frame
+  sta current_player_state
   rts
 .endproc
 
-.proc HandleJump
+.proc handleJump
   ldx jump_index
   ldy jump_values, x
   ; new functionality:
   ;   - when jump starts, set jump bit
-  ;   - has jump bit set until middle of jump_list reached, at which point it gets
-  ;     cleared
-  ;   - also at this point set falling bit
-  ;   
+  ;   - jump bit is cleared upon reaching end of list (27 values)
+  ;   - at end of jump list falling bit is 
+  stx $02
+  ldx #$00
+  stx $00
+  sty $01
+  jsr movePlayer
+  ldx $02
+  inx
+  cpx #27
+  bne end
+  ldx #0                                   ; reset jump index and jump bit
+  lda #%11111101
+  and current_player_state
+  ora #%00001000                           ; set falling bit 
+  sta current_player_state                 ; save the player 
+  stx fall_index                           ; reset fall index
 end:
   stx jump_index
+  rts
+.endproc
+
+; we will need something here that will account for long falls
+;   - what if fall lasts longer than 27 frames?
+;   - clear the falling bit when checking collision
+.proc handleFall
+  ldx fall_index
+  ldy gravity_values, x
+  stx $02
+  ldx #$00
+  stx $00
+  sty $01
+  jsr movePlayer
+  ldx $02
+  inx
+  cpx #27
+  bne end
+  ldx #26
+  lda #%11110111
+  and current_player_state
+  ora #%00001000
+  sta current_player_state
+end:
+  stx fall_index
+  rts
+.endproc
+
+; things to be done in this subroutine:
+; get y-value of bottom of sprite
+; compare this value to tile at corresponding level location
+; to see whether or not to correct the player's position
+.proc checkLowerCollision
+  ; we set the fall bit in the case of this subroutine being called
+  ; when the player walks off of a platform
+  lda #%00001000
+  ora current_player_state
+  sta current_player_state
+  ; now check if we need to clear the bit or not
+  lda spriteOAM + 16
+  cmp #bottom_row
+  bcc end
+  ; clear falling bit, fall index
+  lda #%11110111
+  and current_player_state
+  sta current_player_state
+  ldx #0
+  stx fall_index
+end:
   rts
 .endproc
 
@@ -398,6 +480,8 @@ nate_update_loop:
   ldy #0
   ; checks each bit in animation state and jumps accordingly
   lda current_player_state
+  bit check_falling_bit
+  bne jumping
   bit check_jumping_bit
   beq check_moving
   jmp jumping
@@ -805,7 +889,9 @@ nate_jumping_right:
 
 ; values to pull when jumping
 jump_values:
-  .byte $FD, $FD, $FD, $FD, $FD, $FD, $FD, $FD, $FD, $FE, $FE, $FE, $FE, $FE, $FE, $FE, $FE, $FE, $FF, $FF, $FF, $FF, $FF, $FF, $00, $00, $00, $00, $00, $00, $01, $01, $01, $01, $01, $01, $02, $02, $02, $02, $02, $02, $02, $02, $02, $03, $03, $03, $03, $03, $03, $03, $03, $03
+  .byte $FD, $FD, $FD, $FD, $FD, $FD, $FD, $FD, $FD, $FE, $FE, $FE, $FE, $FE, $FE, $FE, $FE, $FE, $FF, $FF, $FF, $FF, $FF, $FF, $00, $00, $00
+gravity_values:  
+  .byte $00, $00, $00, $01, $01, $01, $01, $01, $01, $02, $02, $02, $02, $02, $02, $02, $02, $02, $03, $03, $03, $03, $03, $03, $03, $03, $03
 
 palettedata:
   .incbin "data\\palettedata.dat"
