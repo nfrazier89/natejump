@@ -50,8 +50,9 @@
 .define current_player_state              $15
 
 ; current index in jump_list (used when player
-; is in the process of jumping) and a boolean
-; denoting whether player is currently jumping
+; is in the process of jumping) and current index
+; in fall_list (used when player is in the process of
+; falling down)
 .define jump_index                        $16
 .define fall_index                        $17
 
@@ -80,6 +81,9 @@
 ; current pointer to pull animation data from
 .define animation_ptr_lo                  $28
 .define animation_ptr_hi                  $29
+
+.define curr_screen_level_addr_lo         $30
+.define curr_screen_level_addr_hi         $31
 
 .segment "STARTUP"
 
@@ -215,11 +219,32 @@ loadsprites:
   cpx #$18                   ;6 sprites for now, so we write 24 times
   bne loadsprites
 
+  ; TODO: initialize a player_x_pos and player_y_pos
+  ;       these will (for now) be tile-based (meaning
+  ;       that a player_x_pos of 15 means the player is currently
+  ;       standing on tile 15 and not pixel 15)
+
+  ; bottom left corner of nate sprite
+  lda spriteOAM + 16
+  lsr A
+  lsr A
+  lsr A
+  sta player_y_pos
+
+  lda spriteOAM + 19
+  lsr A
+  lsr A
+  lsr A
+  sta player_x_pos
+
   ;load first level's base address in memory to use for drawing tiles
   lda level_one_base_addr
   sta curr_level_addr_lo
+  sta curr_screen_level_addr_lo
+
   lda level_one_base_addr + 1
   sta curr_level_addr_hi
+  sta curr_screen_level_addr_hi
 
   ;reset tile_buffer pointer and put it into RAM
   lda tile_buffer_base_addr
@@ -264,8 +289,8 @@ loadsprites:
 
 gameloop:
   jsr ReadController                ; read controller inputs for this frame
-  jsr MovementEngine
-  ; done - wait for vblank
+  jsr MovementEngine                ; handle all player movement 
+  ; done - wait for vblank and next frame
 :
   bit PPU_STATUS
   bpl :-
@@ -299,6 +324,7 @@ gameloop:
 ;              - differentiates between jumping and falling so that player
 ;                can fall off of platforms and also not be able to jump while
 ;                falling
+; 2.1          - generalized collision checking for falling on a ground tile
 .proc MovementEngine
   lda controller_inputs                    ; check left/right movement first
   and #%00000010
@@ -334,9 +360,7 @@ check_jump:
   beq update_falling
 handle_jump:
   ; before we jump we need to make sure we are not falling
-  ; this check is made because of the case where the player walks off of a
-  ; platform (meaning the player is in midair, but neither jumping nor pressing
-  ; A to jump)
+  ; this check is made so that player is not allowed to jump while falling
   lda current_player_state
   and #%00001000
   bne update_falling
@@ -430,10 +454,47 @@ end:
   lda #%00001000
   ora current_player_state
   sta current_player_state
+  
+  lda curr_screen_level_addr_lo
+  sta $00
+  lda curr_screen_level_addr_hi
+  sta $01
+  
   ; now check if we need to clear the bit or not
-  lda spriteOAM + 16
-  cmp #bottom_row
-  bcc end
+  ; TODO: generalize this so that player can jump on uneven ground
+  ;       (not just bottom row of tiles)
+  ;       to do this we need to somehow get the tile directly under the bottom
+  ;       left of the sprite in the level data and see if it is a ground tile
+
+  ; lda spriteOAM + 16
+  ; cmp #bottom_row
+  ; bcc end
+
+  ; store original ptr in zero page to retrieve later
+  
+  
+  ldy player_y_pos
+  iny
+get_level_tile:
+  lda curr_screen_level_addr_lo
+  clc
+  adc #$20
+  bcc check
+  inc curr_screen_level_addr_hi
+check:
+  sta curr_screen_level_addr_lo
+  dey
+  bne get_level_tile
+
+  clc
+  adc player_x_pos
+  sta curr_screen_level_addr_lo
+  
+  lda (curr_screen_level_addr_lo), y
+  cmp #$10
+  beq end
+  
+
   ; clear falling bit, fall index
   lda #%11110111
   and current_player_state
@@ -441,6 +502,10 @@ end:
   ldx #0
   stx fall_index
 end:
+  lda $00
+  sta curr_screen_level_addr_lo
+  lda $01
+  sta curr_screen_level_addr_hi
   rts
 .endproc
 
@@ -460,6 +525,18 @@ nate_update_loop:
   tax
   dey
   bne nate_update_loop
+update_xy_pos: ; updates x and y pos of player
+  lda spriteOAM + 16
+  lsr A
+  lsr A
+  lsr A
+  sta player_y_pos
+  lda spriteOAM + 19
+  lsr A
+  lsr A
+  lsr A
+  sta player_x_pos
+
   rts
 .endproc
 
