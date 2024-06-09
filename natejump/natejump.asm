@@ -35,6 +35,9 @@
 ; maybe reserve $00 - $10 for function parameters / extra registers
 
 
+; so i'm thinking to use this to check when to load more level data in VRAM
+.define curr_level_boundary               $11
+
 ; player x pos and y pos to check level collision
 .define player_x_pos                      $12
 .define player_y_pos                      $13
@@ -84,6 +87,10 @@
 
 .define curr_screen_level_addr_lo         $30
 .define curr_screen_level_addr_hi         $31
+
+; this should be for checking if the whole level has been loaded so that
+; the game doesn't just load in shit when it shouldn't be 
+.define end_of_level                      $32
 
 .segment "STARTUP"
 
@@ -265,6 +272,9 @@ loadsprites:
   ; draw the starting nametable to the screen
   jsr draw_starting_screen
 
+  ldx #32
+  stx curr_level_boundary
+
   ; jsr load_next_vertical_slice
   ldx #0
   stx draw
@@ -289,7 +299,9 @@ loadsprites:
 
 gameloop:
   jsr ReadController                ; read controller inputs for this frame
-  jsr MovementEngine                ; handle all player movement 
+  jsr MovementEngine                ; handle all player movement
+  ; check if we need to load more VRAM
+  jsr CheckLoad
   ; done - wait for vblank and next frame
 :
   bit PPU_STATUS
@@ -297,19 +309,20 @@ gameloop:
   jmp gameloop
 .endproc
 
-; sample code cuz we renovating the movement engine
-; checkleft:
-;   lda controller_inputs
-;   and #%00000010
-;   beq checkright
-;   ldx #$03
-;   ldy #$ff
-;   stx $00
-;   sty $01
-;   jsr movePlayer
-;   lda #%00000101 ; set direction, moving bits
-;   ora current_player_state
-;   sta current_player_state
+; check to see if more of the level needs to load
+.proc CheckLoad
+  ldx player_x_pos
+  lda curr_level_boundary
+  sec
+  sbc player_x_pos
+  cmp #16
+  bpl end
+  jsr load_next_vertical_slice
+  ldx #1
+  stx draw
+end:
+  rts
+.endproc
 
 ; handles player movement each frame
 ; 1.1          - moves down if in midair, and left or right depending on
@@ -461,10 +474,6 @@ end:
   sta $01
   
   ; now check if we need to clear the bit or not
-  ; TODO: generalize this so that player can jump on uneven ground
-  ;       (not just bottom row of tiles)
-  ;       to do this we need to somehow get the tile directly under the bottom
-  ;       left of the sprite in the level data and see if it is a ground tile
 
   ; lda spriteOAM + 16
   ; cmp #bottom_row
@@ -526,12 +535,12 @@ nate_update_loop:
   dey
   bne nate_update_loop
 update_xy_pos: ; updates x and y pos of player
-  lda spriteOAM + 16
+  lda spriteOAM + 20
   lsr A
   lsr A
   lsr A
   sta player_y_pos
-  lda spriteOAM + 19
+  lda spriteOAM + 23
   lsr A
   lsr A
   lsr A
