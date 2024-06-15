@@ -88,9 +88,22 @@
 .define curr_screen_level_addr_lo         $30
 .define curr_screen_level_addr_hi         $31
 
+; these variables are for the new and improved loading mechanism
+
+; ppu_base denotes the current PPU nametable high byte
+; (can be $20, $24, $28, or $2C)
+; ppu_tile denotes the current column in the nametable we will
+; load tiles to (can be $00, $04, $08, $0C, $10, $14, $18, $1C)
+; ppu_palette denotes current area in nametable where we load
+; palette data into (can be $C1 - $C7)
+
+.define ppu_base                          $32
+.define ppu_tile                          $33
+.define ppu_palette                       $34
+
 ; this should be for checking if the whole level has been loaded so that
 ; the game doesn't just load in shit when it shouldn't be 
-.define end_of_level                      $32
+.define end_of_level                      $35
 
 .segment "STARTUP"
 
@@ -126,7 +139,12 @@ nate_moving_right_ptr:
 nate_jumping_left_ptr:
   .addr nate_jumping_left
 nate_jumping_right_ptr:
-  .addr nate_jumping_right 
+  .addr nate_jumping_right
+
+; we will pull from here to get a new ppu_base when we need to shift
+; a nametable (like when we scroll and need a new nametable to write to)
+ppu_bases:
+  .byte $20, $24, $28, $2C
 
 
 .proc irq
@@ -137,10 +155,6 @@ nate_jumping_right_ptr:
 ; not sure if I am ineffecient or if I should just load less tiles into 
 ; the tile_buffer per frame if we need to scroll. smtg to think about
 .proc nmi
-  ldx draw
-  beq drawsprites
-  jsr draw_next_vertical_slice
-  dec draw
 drawsprites:
   ; sprite OAM range
   lda #$02
@@ -226,19 +240,19 @@ loadsprites:
   cpx #$18                   ;6 sprites for now, so we write 24 times
   bne loadsprites
 
-  ; TODO: initialize a player_x_pos and player_y_pos
-  ;       these will (for now) be tile-based (meaning
-  ;       that a player_x_pos of 15 means the player is currently
-  ;       standing on tile 15 and not pixel 15)
+  ; initialize a player_x_pos and player_y_pos
+  ; these will (for now) be tile-based (meaning
+  ; that a player_x_pos of 15 means the player is currently
+  ; standing on tile 15 and not pixel 15)
 
   ; bottom left corner of nate sprite
-  lda spriteOAM + 16
+  lda spriteOAM + 20
   lsr A
   lsr A
   lsr A
   sta player_y_pos
 
-  lda spriteOAM + 19
+  lda spriteOAM + 23
   lsr A
   lsr A
   lsr A
@@ -259,11 +273,18 @@ loadsprites:
   lda tile_buffer_base_addr + 1
   sta tile_buffer_ptr_hi
 
-  ;reset current nametable ptr
-  lda base_nametable_addr
+  ; reset nametable pointer data - set nametable ptr to $00,
+  ; set palette ptr to $C0 (ppu_base used for both ptrs)
+  lda #$00
   sta curr_ppu_nametable_ptr_lo
-  lda base_nametable_addr + 1
+  sta ppu_tile
+
+  lda ppu_bases
   sta curr_ppu_nametable_ptr_hi
+  sta ppu_base
+
+  lda #$C0
+  sta ppu_palette
 
   ; reset jump boolean, jump index
   ldx #0
@@ -300,28 +321,10 @@ loadsprites:
 gameloop:
   jsr ReadController                ; read controller inputs for this frame
   jsr MovementEngine                ; handle all player movement
-  ; check if we need to load more VRAM
-  jsr CheckLoad
-  ; done - wait for vblank and next frame
 :
   bit PPU_STATUS
   bpl :-
   jmp gameloop
-.endproc
-
-; check to see if more of the level needs to load
-.proc CheckLoad
-  ldx player_x_pos
-  lda curr_level_boundary
-  sec
-  sbc player_x_pos
-  cmp #16
-  bpl end
-  jsr load_next_vertical_slice
-  ldx #1
-  stx draw
-end:
-  rts
 .endproc
 
 ; handles player movement each frame
@@ -411,7 +414,7 @@ end:
   ; new functionality:
   ;   - when jump starts, set jump bit
   ;   - jump bit is cleared upon reaching end of list (27 values)
-  ;   - at end of jump list falling bit is 
+  ;   - at end of jump list falling bit is set
   stx $02
   ldx #$00
   stx $00
@@ -729,9 +732,9 @@ read_loop:
 
 .proc draw_starting_screen
   lda PPU_STATUS ; reset latch
-  lda #PPU_nametable_base_addr_hi
+  lda ppu_base
   sta PPU_ADDR
-  lda #PPU_nametable_base_addr_lo
+  lda ppu_tile
   sta PPU_ADDR
   
   ; loop runs 1024 times to write all 1024 bytes of screen info to the PPU
@@ -740,11 +743,12 @@ read_loop:
 nameloop:
   lda (curr_level_addr_lo), y
   sta PPU_DATA
+
   iny
-  inc curr_ppu_nametable_ptr_lo
+  inc ppu_tile
   bne nameloop
   inc curr_level_addr_hi
-  inc curr_ppu_nametable_ptr_hi
+  inc ppu_base
   dex
   bne nameloop
 
@@ -767,194 +771,6 @@ nameloop:
 return:
   stx curr_level_palette_ptr_hi
   sta curr_level_palette_ptr_lo
-
-  rts
-.endproc
-
-; Takes 4 columns' worth of level data and loads it into RAM for the PPU
-; to read during vblank
-; takes up ~15.5% of frame time. Combined with vblank, takes up ~23-24%
-.proc load_next_vertical_slice
-  
-  ; reset tile_buffer ptr
-  ldx #$00
-  stx tile_buffer_ptr_lo
-
-  ;counter in memory to check if loop has run 4 times
-  ldx #4
-  stx $02
-
-vertical_slice:
-  ; load original level pointer into ram to get it later
-  ldx curr_level_addr_hi
-  stx $00
-  ldy curr_level_addr_lo
-  sty $01
- ; alright we need to run this loop 30 times for each tile in a 
- ; vertical column
-  ldx #30
-  ldy #0
-tile_loop:
-  lda (curr_level_addr_lo), y
-  ; store tile in memory and move tile buffer ptr
-  sta (tile_buffer_ptr_lo), y
-  inc tile_buffer_ptr_lo
-
-  ; increment level address pointer (by 32), incrementing
-  ; high byte to account for overflow when needed
-  lda curr_level_addr_lo
-  clc
-  adc #$20
-  bcc check_condition
-  inc curr_level_addr_hi
-check_condition:
-  sta curr_level_addr_lo
-  dex
-  bne tile_loop
-
-  ; reset level pointer to original + 1 for next vertical slice
-  ; need to check for overflow here too
-  ldx $00
-  ldy $01
-  iny
-  bne store_new_level_addr
-  inx
-store_new_level_addr:
-  stx curr_level_addr_hi
-  sty curr_level_addr_lo
-
-  ; check if 4 vertical columns (slices, whatever we callin them)
-  ; have been loaded or not
-  dec $02
-  bne vertical_slice
-
-  ; load the 8 palette bytes required to color these tiles
-  ; store original ptr in ram to use at the end
-  lda curr_level_palette_ptr_hi
-  sta $00
-  lda curr_level_palette_ptr_lo
-  sta $01
-
-  ldy #0
-  ldx #8
-load_palette_data:
-  lda (curr_level_palette_ptr_lo), y
-  sta (tile_buffer_ptr_lo), y
-  inc tile_buffer_ptr_lo
-
-  lda curr_level_palette_ptr_lo
-  clc 
-  adc #$08
-  bcc check_palette_cond
-  inc curr_level_palette_ptr_hi
-check_palette_cond:
-  sta curr_level_palette_ptr_lo
-  dex
-  bne load_palette_data
-
-  ; reset palette ptr to original + 1
-  ldx $00
-  ldy $01
-  iny
-  bne store_new_palette_addr
-  inx
-store_new_palette_addr:
-  stx curr_level_palette_ptr_hi
-  sty curr_level_palette_ptr_lo
-
-  rts
-.endproc
-
-; takes the tiles loaded into tile_buffer and draw them
-; in the nametables accordingly
-; *** needs to be more general, still some hardcoding in there right now ***
-.proc draw_next_vertical_slice
-
-  ; reset latch 
-  ldx PPU_STATUS
-  ; vertical increment mode on the PPU
-  ldx #%10010101
-  stx PPU_CTRL
-
-  ; loop counter for columns 
-  ldx #4
-  stx $00
-  ldx #0
-load_next_column:
-  ldy curr_ppu_nametable_ptr_hi
-  sty PPU_ADDR
-  ldy curr_ppu_nametable_ptr_lo
-  sty PPU_ADDR
-  ; x here is used as offset for tile_buffer, y is used as loop counter
-  ldy #3
-column_loop:
-  ; this may look like shit but unrolled loop may be the move here to save time
-  ; each iteration loads 10 tiles into VRAM (can play around with this number 
-  ; potentially)
-  lda tile_buffer, x
-  sta PPU_DATA
-  inx
-  lda tile_buffer, x
-  sta PPU_DATA
-  inx
-  lda tile_buffer, x
-  sta PPU_DATA
-  inx
-  lda tile_buffer, x
-  sta PPU_DATA
-  inx
-  lda tile_buffer, x
-  sta PPU_DATA
-  inx
-  lda tile_buffer, x
-  sta PPU_DATA
-  inx
-  lda tile_buffer, x
-  sta PPU_DATA
-  inx
-  lda tile_buffer, x
-  sta PPU_DATA
-  inx
-  lda tile_buffer, x
-  sta PPU_DATA
-  inx
-  lda tile_buffer, x
-  sta PPU_DATA
-  inx
-  
-  dey
-  bne column_loop
-
-  ; get PPU ready for next column
-  inc curr_ppu_nametable_ptr_lo
-
-  dec $00
-  bne load_next_column
-
-  ; palette time (hardcoded for now)
-  lda #$C0
-  ldy #0
-palette_loop:
-  ldx PPU_STATUS
-  ldx #$27
-  stx PPU_ADDR
-  sta PPU_ADDR
-  ldx tile_buffer_palette_data, y
-  stx PPU_DATA
-  iny
-  clc 
-  adc #$08
-  bcc palette_loop
-
-  ; reset scroll back to where the player is
-  ; this will require a rework when the game gets more complex
-  ; reset latch 
-  ldx PPU_STATUS
-  ldx #%10010100
-  stx PPU_CTRL
-  lda #0
-  sta PPU_SCROLL
-  sta PPU_SCROLL
 
   rts
 .endproc
